@@ -1,5 +1,6 @@
 # Test with Spdsw
 # %%
+import matplotlib.pyplot as plt
 import warnings
 import torch
 import argparse
@@ -74,7 +75,7 @@ if DOWNLOAD:
 hyperparams = {
     "distance": ["spdsw"],
     "n_proj": [500],
-    "n_epochs": [500],
+    "n_epochs": [1500],
     "seed": RNG.choice(10000, NTRY, replace=False),
     "subject": [1],
     "target_subject": [3],
@@ -168,9 +169,9 @@ class SpodNet(nn.Module):
 
         self.col_learner = nn.Sequential(
             # nn.Flatten(),
-            nn.Linear(self.p-1, self.p - 1, dtype=torch.float64),
-            # nn.ReLU(),
-            # nn.Linear(10, self.p - 1, dtype=torch.float64), nn.ReLU(),
+            nn.Linear(self.p - 1, self.p - 1, dtype=torch.float64),
+            nn.ReLU(),
+            nn.Linear(self.p - 1, self.p - 1, dtype=torch.float64), nn.ReLU(),
             # nn.Linear(10, self.p - 1, dtype=torch.float64)
         )
 
@@ -210,9 +211,10 @@ class SpodNet(nn.Module):
 
             # Compute schur comp
             schur = einsum("bi, bij, bj->b", theta_12_next,
-                           inv_Theta_11, theta_12_next)
-            gy = theta_22 - einsum("bi, bij, bj->b",
-                                   theta_12, inv_Theta_11, theta_12)
+                           W_11, theta_12_next)
+            gy = theta_22
+            # - einsum("bi, bij, bj->b",
+            #                       theta_12, inv_Theta_11, theta_12)
 
             theta_22_next = gy + schur
 
@@ -243,126 +245,38 @@ class SpodNet(nn.Module):
         return Theta
 
 
-class TwoStepSpodNet(nn.Module):
-
-    def __init__(self, p, K=1):
-        super().__init__()
-
-        self.p = p
-        self.log = {}
-        self.log['lambda_min_Theta'] = []
-        self.log['schur'] = []
-        self.log['norm_diff'] = []
-        self.K = K
-
-        self.col_learner = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(self.p**2, self.p - 1, dtype=torch.float64),
-            nn.ReLU(),
-            nn.Linear(self.p - 1, self.p - 1, dtype=torch.float64)
-        )
-
-    def update_W_from_Theta(self, theta_22_next, theta_12_next, inv_Theta_11, _11, _12, _21, _22):
-        # update W
-        w_22_next = 1.0 / \
-            (theta_22_next - _quad_prod(inv_Theta_11, theta_12_next))
-
-        w_12_next = einsum('b, bij, bj ->bi', -w_22_next,
-                           inv_Theta_11, theta_12_next)
-
-        self.W[_11] = (
-            inv_Theta_11 + _a_outer(1.0 / w_22_next, w_12_next, w_12_next)).detach()
-        self.W[_12] = w_12_next.detach()
-        self.W[_21] = w_12_next.detach()
-        self.W[_22] = w_22_next.detach()
-
-    def one_pass(self, Theta):
-        indices = torch.arange(self.p)
-        Delta = torch.zeros_like(Theta)
-        for col in range(self.p):  # update col
-
-            indices_minus_col = torch.cat([indices[:col], indices[col + 1:]])
-            _11 = slice(
-                None), indices_minus_col[:, None], indices_minus_col[None]
-            _12 = slice(None), indices_minus_col, col
-            _21 = slice(None), col, indices_minus_col
-            _22 = slice(None), col, col
-
-            # Blocks of Theta
-            theta_12 = Theta[_12]
-            theta_12_next = self.col_learner(Theta)
-
-            Delta[_12] = theta_12_next - theta_12
-            Delta[_21] = theta_12_next - theta_12
-
-        Theta = Theta + Delta
-
-        for col in range(self.p):  # update diag
-
-            indices_minus_col = torch.cat([indices[:col], indices[col + 1:]])
-            _11 = slice(
-                None), indices_minus_col[:, None], indices_minus_col[None]
-            _12 = slice(None), indices_minus_col, col
-            _21 = slice(None), col, indices_minus_col
-            _22 = slice(None), col, col
-
-            # Blocks of Theta
-            theta_12 = Theta[_12]
-            theta_22 = Theta[_22]
-            diff_12 = Delta[_12]
-
-            # Blocks of W
-            W_11 = self.W[_11]
-            w_22 = self.W[_22]
-            w_12 = self.W[_12]
-
-            inv_Theta_11 = W_11 - _a_outer(1.0/w_22, w_12, w_12)
-            # Compute schur comp
-            schur = _quad_prod(inv_Theta_11, diff_12)
-
-            gy = theta_22
-            theta_22_next = gy + schur
-
-            # Update W
-            Delta_diag = torch.zeros_like(Theta)
-            Delta_diag[_22] = theta_22_next - theta_22
-            Theta = Theta + Delta_diag
-            # update W
-            self.update_W_from_Theta(
-                theta_22_next, theta_12, inv_Theta_11, _11, _12, _21, _22)
-
-        return Theta
-
-    def forward(self, Theta):
-        """ Forward pass. """
-
-        self.W = torch.linalg.inv(Theta).detach()
-
-        # W = S + self.diag_init * torch.eye(S.shape[-1]).expand_as(S).type_as(S)
-        for k in range(0, self.K):
-            Theta = self.one_pass(Theta)
-
-        return Theta
-
-
 # %%
 # cov_Xs.shape
 # p = Xs.shape[1]
 # model = TwoStepSpodNet(p=p, K=1)
-
 # zs = model(cov_Xs.squeeze())
-
-
+# %%
 d = 22
 n_freq = cov_Xs.shape[2]
 
 n_samples_s = len(cov_Xs)
 n_samples_t = len(cov_Xt)
 
-model = TwoStepSpodNet(p=d, K=1)
 
+# %%
+# l = 0
+# zs = model(cov_Xs.squeeze())
+# torch.linalg.eigvalsh(model.W[l])
+# x = (model.W[l] @ zs[l]).detach()
+# plt.imshow(x)
+# print(f'{torch.linalg.eigvalsh(cov_Xs.squeeze()[l])}')
+# print(f'{torch.linalg.eigvalsh(zs[l])}')
+# print(f'{torch.linalg.eigvalsh(model.W[l])}')
+
+# torch.save(cov_Xs.squeeze()[l], '../test/test_tensor.pt')
+
+# %%
+
+
+# %%
 # model = Transformations(d, n_freq, DEVICE, DTYPE, seed=seed)
-
+p = 22
+model = SpodNet(p=p, K=1)
 start = time.time()
 
 if distance in ["lew", "les"]:
@@ -393,9 +307,8 @@ OPTIMIZERS = {'SGD': torch.optim.SGD,
               'NAdam': torch.optim.NAdam,
               'LBFGS': torch.optim.LBFGS}
 optimizer_name = 'Adam'
-lr = 1e-5
+lr = 1e-3
 optimizer = OPTIMIZERS[optimizer_name](model.parameters(), lr=lr)
-
 
 # %%
 pbar = trange(n_epochs)
@@ -429,10 +342,109 @@ s_noalign = get_svc(cov_Xs[:, 0], cov_Xt[:, 0], ys,
                     yt, d, multifreq, n_jobs=N_JOBS, random_state=seed)
 # %%
 s_align = get_svc(
-    model(cov_Xs.squeeze()).reshape(cov_Xs.shape)[:, 0],  ys,
+    model(cov_Xs.squeeze()).reshape(cov_Xs.shape)[:, 0], cov_Xt[:, 0],  ys,
     # model(cov_Xs)[:, 0], cov_Xt[:, 0], ys,
     yt, d, multifreq, n_jobs=N_JOBS, random_state=seed)
 
 # %%
 print(f'{s_noalign}, {s_align}')
 # %%
+# class TwoStepSpodNet(nn.Module):
+
+#     def __init__(self, p, K=1):
+#         super().__init__()
+
+#         self.p = p
+#         self.log = {}
+#         self.log['lambda_min_Theta'] = []
+#         self.log['schur'] = []
+#         self.log['norm_diff'] = []
+#         self.K = K
+
+#         self.col_learner = nn.Sequential(
+#             nn.Linear(self.p - 1, self.p - 1, dtype=torch.float64),
+#             nn.ReLU(),
+#             nn.Linear(self.p - 1, self.p - 1, dtype=torch.float64)
+#         )
+
+#     def update_W_from_Theta(self, theta_22_next, theta_12_next, inv_Theta_11, _11, _12, _21, _22):
+#         # update W
+#         w_22_next = 1.0 / \
+#             (theta_22_next - _quad_prod(inv_Theta_11, theta_12_next))
+
+#         w_12_next = einsum('b, bij, bj ->bi', -w_22_next,
+#                            inv_Theta_11, theta_12_next)
+
+#         self.W[_11] = (
+#             inv_Theta_11 + _a_outer(1.0 / w_22_next, w_12_next, w_12_next)).detach()
+#         self.W[_12] = w_12_next.detach()
+#         self.W[_21] = w_12_next.detach()
+#         self.W[_22] = w_22_next.detach()
+
+#     def one_pass(self, Theta):
+#         indices = torch.arange(self.p)
+#         Delta = torch.zeros_like(Theta)
+#         for col in range(self.p):  # update col
+
+#             indices_minus_col = torch.cat([indices[:col], indices[col + 1:]])
+#             _11 = slice(
+#                 None), indices_minus_col[:, None], indices_minus_col[None]
+#             _12 = slice(None), indices_minus_col, col
+#             _21 = slice(None), col, indices_minus_col
+#             _22 = slice(None), col, col
+
+#             # Blocks of Theta
+#             theta_12 = Theta[_12]
+#             theta_12_next = self.col_learner(theta_12)
+
+#             Delta[_12] = theta_12_next - theta_12
+#             Delta[_21] = theta_12_next - theta_12
+
+#         Theta = Theta + Delta
+
+#         for col in range(self.p):  # update diag
+
+#             indices_minus_col = torch.cat([indices[:col], indices[col + 1:]])
+#             _11 = slice(
+#                 None), indices_minus_col[:, None], indices_minus_col[None]
+#             _12 = slice(None), indices_minus_col, col
+#             _21 = slice(None), col, indices_minus_col
+#             _22 = slice(None), col, col
+
+#             # Blocks of Theta
+#             theta_12 = Theta[_12]
+#             theta_22 = Theta[_22]
+#             diff_12 = Delta[_12]
+
+#             # Blocks of W
+#             W_11 = self.W[_11]
+#             w_22 = self.W[_22]
+#             w_12 = self.W[_12]
+
+#             inv_Theta_11 = W_11 - _a_outer(1.0/w_22, w_12, w_12)
+#             # Compute schur comp
+#             schur = _quad_prod(inv_Theta_11, diff_12)
+
+#             gy = theta_22
+#             theta_22_next = gy + schur
+
+#             # Update W
+#             Delta_diag = torch.zeros_like(Theta)
+#             Delta_diag[_22] = theta_22_next - theta_22
+#             Theta = Theta + Delta_diag
+#             # update W
+#             self.update_W_from_Theta(
+#                 theta_22_next, theta_12, inv_Theta_11, _11, _12, _21, _22)
+
+#         return Theta
+
+#     def forward(self, Theta):
+#         """ Forward pass. """
+
+#         self.W = torch.linalg.inv(Theta).detach()
+
+#         # W = S + self.diag_init * torch.eye(S.shape[-1]).expand_as(S).type_as(S)
+#         for k in range(0, self.K):
+#             Theta = self.one_pass(Theta)
+
+#         return Theta
